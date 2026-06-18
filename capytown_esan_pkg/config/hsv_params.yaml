@@ -1,29 +1,34 @@
-# CapyTown G4 - Rangos HSV de partida (sec. 5.1 del enunciado).
-#
-# IMPORTANTE: estos valores son el punto de partida del enunciado/
-# hsv_tuner.py. RECALIBRAR el mismo dia del lab con
-# scripts/hsv_calibrate.py bajo la iluminacion real de la pista, y
-# reemplazar los valores de abajo por los obtenidos (anotar tambien en
-# el README la hora/luz con la que se calibro).
+# CapyTown G4 - Rangos HSV (alineados con el repo de referencia que ya corre
+# correctamente en pista). RECALIBRAR el dia del lab con
+# scripts/hsv_calibrate.py o `python3 lane_node.py --calibrar` bajo la
+# iluminacion real, y reemplazar abajo los valores obtenidos.
 lane_detector:
   ros__parameters:
-    # Blanco - borde derecho del carril
+
+    # Blanco - HSV (baja saturacion, alto brillo)
     white_h_min: 0
     white_h_max: 180
     white_s_min: 0
-    white_s_max: 30
-    white_v_min: 180
+    white_s_max: 65
+    white_v_min: 170
     white_v_max: 255
-    # Amarillo - eje central discontinuo
-    yellow_h_min: 20
-    yellow_h_max: 35
-    yellow_s_min: 100
+    white_min_elong: 5.0
+    white_min_area: 1000
+    white_max_area: 8000
+
+    # Amarillo - HSV
+    yellow_h_min: 15
+    yellow_h_max: 45
+    yellow_s_min: 45
     yellow_s_max: 255
-    yellow_v_min: 100
+    yellow_v_min: 80
     yellow_v_max: 255
+    yellow_min_elong: 8.0
+    yellow_min_area: 500
+    yellow_max_area: 20000
+
     # Geometria / IPM
-    min_area: 150            # area minima de contorno (px) para filtrar ruido
-    lane_width_m: 0.21        # ancho de carril CapyTown (m)
-    px_per_meter: 600.0       # escala de la vista IPM (px por metro) - calibrar
-    look_ahead_row: 0.6       # fila de muestreo: 0=arriba, 1=abajo de la imagen IPM
+    lane_width_m: 0.22
+    px_per_meter: 600.0
     publish_debug: true
+    white_bias_m: 0.02   # m — desplaza el centro objetivo 2cm hacia el amarillo

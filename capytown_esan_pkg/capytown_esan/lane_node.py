@@ -1,191 +1,105 @@
 #!/usr/bin/env python3
 """
-╔══════════════════════════════════════════════════════════════════════════╗
-║    CapyTown — Semana 11 · RC-2 · "Las 3 Vueltas del Jirón"            ║
-║    Lane Following: Visión HSV + IPM + Control PID                      ║
-║    Universidad ESAN · Robótica 2026-I · Grupo 4                        ║
-╚══════════════════════════════════════════════════════════════════════════╝
+==============================================================================
+  CapyTown - Semana 11 - RC-2 - "Las 3 Vueltas del Jiron"
+  Lane Following: Vision HSV + IPM + Control PID  (ARCHIVO UNICO)
+  Universidad ESAN - Robotica 2026-I - Grupo 4
+==============================================================================
 
-ARCHIVO ÚNICO que incluye:
-  - Todas las variables configurables explicadas al inicio
-  - Calibrador HSV interactivo (modo --calibrar)
-  - LaneDetector: detecta líneas y calcula error lateral en metros
-  - LaneController: PID que convierte el error en velocidad del robot
-  - Contador de vueltas por odometría
+Reescrito para replicar el funcionamiento del repo de referencia que YA corre
+correctamente en pista (github.com/23-Andres-QC/Reto02), en un solo archivo.
+
+QUE INCLUYE:
+  - Posicionamiento AUTOMATICO de la camara (publica /servo_s2 = -45 al
+    arrancar). >>> Este era el problema: antes la camara no quedaba apuntando
+    a la pista y por eso no detectaba las lineas. Ahora se posiciona sola. <<<
+  - LaneDetector robusto: deteccion amarillo+blanco en HSV sobre vista de
+    pajaro (IPM), filtro de forma por PCA, 3 bandas horizontales, suavizado EMA
+    y publicacion de error (/lane_error) y pendiente (/lane_slope).
+  - LaneController: PID + anticipacion de curva (feed-forward por pendiente) +
+    giro dedicado en esquinas + espera de arranque. Frena si no ve ninguna linea.
+  - Contador de vueltas por odometria (mision de NUM_VUELTAS).
+  - Calibrador HSV interactivo (modo --calibrar).
 
 MODOS DE USO:
-  Normal   : ros2 run capytown_esan_pkg lane_node
+  Normal   : python3 lane_node.py        (o: ros2 run capytown_esan_pkg lane_node)
   Calibrar : python3 lane_node.py --calibrar --source 0
+
+CONVENCION DE SIGNO:
+  error > 0 -> centro a la DERECHA  -> girar derecha (w < 0)
+  error < 0 -> centro a la IZQUIERDA -> girar izquierda (w > 0)
 """
 
-# ═══════════════════════════════════════════════════════════════════════════════
-#  SECCIÓN 1 — VARIABLES CONFIGURABLES
-#  Modifica estos valores para ajustar el comportamiento del robot.
-#  Cada variable tiene comentarios de qué pasa si subes (+) o bajas (-).
-# ═══════════════════════════════════════════════════════════════════════════════
+# ============================================================================
+#  SECCION 1 - VARIABLES CONFIGURABLES
+# ============================================================================
 
-# ── MISIÓN ────────────────────────────────────────────────────────────────────
+# -- MISION --
+NUM_VUELTAS = 3            # vueltas autonomas antes de frenar
+METROS_POR_VUELTA = 6.4    # perimetro aprox. de una vuelta (m)
 
-NUM_VUELTAS = 3
-# Número de vueltas autónomas que el robot debe completar antes de detenerse.
-# (+) Más vueltas → el robot corre por más tiempo antes de frenar.
-# (-) Menos vueltas → el robot se detiene antes. Mínimo recomendado: 3 (RC-2).
+# -- POSICION DE CAMARA (servo) --
+SERVO_S2 = -45             # grados; se publica en /servo_s2 al arrancar
+SERVO_INIT_DELAY = 0.5     # s antes de publicar la posicion de camara
 
-METROS_POR_VUELTA = 6.4
-# Perímetro aproximado de UNA vuelta al Escenario A (m).
-# Escenario A = 2.0 × 2.0 m. Contorno ≈ 6.4 m.
-# (+) Subir → el robot espera recorrer más antes de contar la vuelta.
-#     Usar si cuenta vueltas antes de terminar el circuito.
-# (-) Bajar → cuenta las vueltas antes de terminar.
+# -- VELOCIDAD / CONTROL --
+LINEAR_SPEED = 0.34        # m/s de crucero (>=0.2 requerido)
+CURVE_SPEED_FACTOR = 0.6   # reduce velocidad 40% siempre (margen de reaccion)
+MAX_ANGULAR = 2.0          # rad/s tope de giro
+CONTROL_RATE = 30.0        # Hz del lazo de control
+START_DELAY = 5.0          # s quieto tras la primera deteccion
+ERROR_TIMEOUT = 0.5        # s sin color -> frena
 
-# ── VELOCIDAD ─────────────────────────────────────────────────────────────────
-
-LINEAR_SPEED = 0.20
-# Velocidad lineal de crucero en metros por segundo (m/s).
-# Mínimo aceptable para RC-2: 0.15 m/s.
-# (+) Más rápido → completa las vueltas en menos tiempo (mejor tiempo Grand Prix),
-#     pero el PID tiene menos tiempo para corregir → puede salirse en curvas.
-# (-) Más lento → más fácil de controlar, más estable en curvas, pero más lento.
-
-MAX_ANGULAR = 2.0
-# Velocidad angular máxima en radianes por segundo (rad/s). Límite de giro.
-# (+) Permite giros más bruscos → útil en curvas cerradas, pero puede oscilar.
-# (-) Giros más suaves → trayectoria más fluida, pero puede no girar
-#     lo suficiente en curvas cerradas y salirse.
-
-# ── CONTROL PID ───────────────────────────────────────────────────────────────
-# El PID calcula cuánto debe girar el robot según el error lateral.
-# Fórmula: omega = Kp*e + Ki*integral(e) + Kd*de/dt
-# REGLA DE ORO: ajusta UN parámetro a la vez. Primero Kp, luego Kd, al final Ki.
-
-KP = 2.5
-# Ganancia Proporcional — reacciona al error ACTUAL.
-# (+) Reacciona más fuerte → corrige más rápido, pero si es muy alto
-#     el robot zigzaguea (oscila) porque sobre-corrige constantemente.
-# (-) Reacciona más suave → el robot va más recto pero tarda en corregir
-#     las curvas y puede salirse del carril lentamente.
-# Rango típico: 1.0 – 5.0.
-
-KI = 0.0
-# Ganancia Integral — corrige el error acumulado en el tiempo.
-# Útil si el robot siempre se va hacia el mismo lado en las rectas.
-# (+) Corrige más el sesgo sostenido, pero si es muy alto
-#     causa sobreoscilación y "wind-up" (sobre-corrige en curvas).
-# (-) No corrige el sesgo. Dejar en 0.0 mientras Kp y Kd no estén ajustados.
-# Si se activa, usar valores pequeños: 0.01 – 0.1.
-
-KD = 0.3
-# Ganancia Derivativa — amortigua el cambio del error (anticipa la corrección).
-# (+) Amortigua más las oscilaciones de Kp alto → reduce el zigzag.
-#     Si es muy alto amplifica el ruido de la cámara → movimientos bruscos.
-# (-) Menos amortiguación → el robot puede oscilar más en rectas largas.
-# Rango típico: 0.1 – 1.0.
-
+# -- PID --
+KP = 2.2
+KI = 0.12
+KD = 0.25
+KFF = 0.6                  # feed-forward de anticipacion por pendiente
 INTEGRAL_LIMIT = 0.5
-# Límite anti-windup del término integral (metros). Evita que Ki "explote".
-# (+) Permite mayor acumulación → más corrección de sesgo,
-#     pero más riesgo de sobreoscilación si Ki > 0.
-# (-) Limita más el integral → más seguro, pero Ki tiene menos efecto.
 
-ERROR_TIMEOUT = 0.5
-# Segundos sin recibir /lane_error antes de frenar por seguridad.
-# (+) Más tolerante a pérdidas momentáneas de detección → no frena tan fácil.
-#     Riesgo: si se sale del carril, tarda más en frenar.
-# (-) Frena más rápido si pierde las líneas → más seguro, pero puede frenar
-#     en curvas donde momentáneamente solo ve una línea.
+# -- ESQUINAS (giro dedicado) --
+SLOPE_CURVE_THRESHOLD = 0.04        # pendiente minima para anticipar curva
+SHARP_TURN_SLOPE_THRESHOLD = 0.13   # pendiente que indica esquina ~90 grados
+SHARP_TURN_KP_SLOPE = 3.0
+SHARP_TURN_KP_E = 2.5
+SHARP_TURN_MAX_W = 0.80
+SHARP_TURN_SPEED_FACTOR = 0.3
+MAX_ANTICIPATION_TIME = 0.8
+CALIB_TOLERANCE = 0.025
 
-CONTROL_RATE = 30.0
-# Frecuencia del lazo de control en Hz (veces por segundo que calcula el PID).
-# (+) Más frecuente → reacciona más rápido, más preciso, pero usa más CPU.
-# (-) Menos frecuente → reacciona más lento, puede perder detalles a alta velocidad.
+# -- VISION: COLORES HSV --
+WHITE_H_MIN, WHITE_H_MAX = 0, 180
+WHITE_S_MIN, WHITE_S_MAX = 0, 65
+WHITE_V_MIN, WHITE_V_MAX = 170, 255
+WHITE_MIN_ELONG = 5.0
+WHITE_MIN_AREA = 1000
+WHITE_MAX_AREA = 8000
 
-# ── VISIÓN — COLORES HSV ──────────────────────────────────────────────────────
-# HSV = Tono (H: 0-180), Saturación (S: 0-255), Valor/Brillo (V: 0-255).
-# IMPORTANTE: recalibrar con modo --calibrar al inicio de cada sesión de lab.
+YELLOW_H_MIN, YELLOW_H_MAX = 15, 45
+YELLOW_S_MIN, YELLOW_S_MAX = 45, 255
+YELLOW_V_MIN, YELLOW_V_MAX = 80, 255
+YELLOW_MIN_ELONG = 8.0
+YELLOW_MIN_AREA = 500
+YELLOW_MAX_AREA = 20000
 
-# Blanco — borde derecho del carril
-WHITE_H_MIN = 0
-WHITE_H_MAX = 180
-# H del blanco no importa (puede ser cualquier tono) → dejar en 0-180.
+# -- VISION: GEOMETRIA / IPM --
+LANE_WIDTH_M = 0.22        # ancho de carril (m)
+PX_PER_METER = 600.0       # escala de la vista IPM
+WHITE_BIAS_M = 0.02        # desplaza el centro objetivo hacia el amarillo
+EMA_ALPHA = 0.5            # suavizado de los centroides
 
-WHITE_S_MIN = 0
-WHITE_S_MAX = 30
-# Saturación del blanco es MUY baja (color casi sin tono).
-# (+) Subir S_max → detecta grises claros. Riesgo: piso gris = "blanco".
-# (-) Bajar S_max → solo blanco puro. Riesgo: línea no detectada (NaN).
-
-WHITE_V_MIN = 180
-WHITE_V_MAX = 255
-# Brillo del blanco es MUY alto.
-# (+) Subir V_min → solo superficies muy brillantes. Más selectivo.
-# (-) Bajar V_min → detecta blancos sombreados. Riesgo: confundir piso gris.
-
-# Amarillo — eje central discontinuo
-YELLOW_H_MIN = 20
-YELLOW_H_MAX = 35
-# Tono del amarillo en OpenCV: aprox 20-35 (escala 0-180).
-# (+) Ampliar rango → más tolerante a variaciones de luz.
-#     Riesgo: captura naranja (H<20) o verde-amarillento (H>40).
-# (-) Estrechar rango → más selectivo, menos falsos positivos.
-
-YELLOW_S_MIN = 100
-YELLOW_S_MAX = 255
-# Saturación del amarillo es alta (color vivo).
-# (+) Subir S_min → exige amarillo más puro. Riesgo: línea desaparece si luz lava el color.
-# (-) Bajar S_min → detecta amarillos más pálidos. Riesgo: captura piso amarillento.
-
-YELLOW_V_MIN = 100
-YELLOW_V_MAX = 255
-# Brillo del amarillo.
-# (+) Subir V_min → exige más brillo. Puede perder línea en sombras.
-# (-) Bajar V_min → detecta amarillos más oscuros. Riesgo: confundir con piso.
-
-# ── VISIÓN — GEOMETRÍA / IPM ──────────────────────────────────────────────────
-
-MIN_AREA = 150
-# Área mínima en píxeles para aceptar una detección como real (filtro de ruido).
-# (+) Ignorar manchas más grandes → menos falsos positivos, pero puede ignorar
-#     la línea cuando está lejos o se ve delgada.
-# (-) Acepta manchas más pequeñas → detecta líneas lejanas, pero más
-#     sensible a reflejos y ruido → saltos en /lane_error.
-
-LANE_WIDTH_M = 0.21
-# Ancho del carril CapyTown en metros (especificación oficial del tile).
-# (+) Subir → asume carril más ancho → estima el centro más alejado.
-# (-) Bajar → estimaciones más conservadoras del centro del carril.
-
-PX_PER_METER = 600.0
-# Escala de la vista IPM: píxeles por metro en la imagen de pájaro.
-# (+) Subir → errores laterales más pequeños → reacciona menos.
-# (-) Bajar → errores laterales más grandes → reacciona más fuerte.
-
-LOOK_AHEAD_ROW = 0.6
-# Fila de la imagen IPM donde se mide el error: 0.0=arriba (lejos), 1.0=abajo (cerca).
-# (+) Subir → más reactivo pero puede oscilar en rectas largas.
-# (-) Bajar → anticipa más las curvas → trayectoria más suave pero reacciona más tarde.
-
-# ── CÁMARA / IPM — TRAPECIO DE PERSPECTIVA ────────────────────────────────────
-
-IPM_TOP_Y = 0.50
-# Altura del borde SUPERIOR del trapecio (fracción de h).
-# (+) Subir → captura menos piso, cámara más horizontal.
-# (-) Bajar → captura más piso. Ideal para cámara inclinada hacia abajo.
-# Original del enunciado: 0.62. Ajustado para cámara más inclinada: 0.50.
-
-IPM_TOP_LEFT_X  = 0.18
-IPM_TOP_RIGHT_X = 0.82
-# Ancho del borde superior del trapecio.
-# (+) Acercar los puntos → trapecio más estrecho arriba.
-# (-) Alejar los puntos → captura más campo lateral.
-
-IPM_BOTTOM_Y = 0.98
-# Altura del borde INFERIOR del trapecio. Normalmente cerca del fondo (0.98).
+# Trapecio de perspectiva (fracciones de w,h) - igual que la referencia
+IPM_TOP_Y = 0.55
+IPM_TOP_LEFT_X = 0.20
+IPM_TOP_RIGHT_X = 0.80
+IPM_BOTTOM_Y = 0.97
+IPM_DST_LEFT = 0.25
+IPM_DST_RIGHT = 0.75
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
-#  SECCIÓN 2 — IMPORTS
-# ═══════════════════════════════════════════════════════════════════════════════
-
+# ============================================================================
+#  SECCION 2 - IMPORTS
+# ============================================================================
 import argparse
 import math
 import sys
@@ -198,27 +112,22 @@ try:
     import rclpy
     from rclpy.node import Node
     from rclpy.executors import MultiThreadedExecutor
-    from sensor_msgs.msg import Image
-    from std_msgs.msg import Float32
+    from sensor_msgs.msg import Image, Imu
+    from std_msgs.msg import Float32, Int32
     from geometry_msgs.msg import Twist
     from nav_msgs.msg import Odometry
     from cv_bridge import CvBridge
     ROS_AVAILABLE = True
 except ImportError:
     ROS_AVAILABLE = False
+    Node = object  # permite importar el archivo (modo --calibrar) sin ROS2 instalado
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
-#  SECCIÓN 3 — FUNCIONES COMPARTIDAS
-# ═══════════════════════════════════════════════════════════════════════════════
-
+# ============================================================================
+#  SECCION 3 - FUNCIONES COMPARTIDAS DE VISION
+# ============================================================================
 def build_ipm(w, h):
-    """
-    Construye la matriz de homografía para la IPM (vista de pájaro).
-
-    Convierte la vista frontal de la cámara a una vista desde arriba donde
-    las distancias en píxeles son proporcionales a distancias reales en el piso.
-    """
+    """Homografia de vista frontal -> vista de pajaro (IPM)."""
     src = np.float32([
         [IPM_TOP_LEFT_X  * w, IPM_TOP_Y    * h],
         [IPM_TOP_RIGHT_X * w, IPM_TOP_Y    * h],
@@ -226,113 +135,404 @@ def build_ipm(w, h):
         [0.00            * w, IPM_BOTTOM_Y * h],
     ])
     dst = np.float32([
-        [0.30 * w, 0.0],
-        [0.70 * w, 0.0],
-        [0.70 * w, h  ],
-        [0.30 * w, h  ],
+        [IPM_DST_LEFT  * w, 0.0],
+        [IPM_DST_RIGHT * w, 0.0],
+        [IPM_DST_RIGHT * w, h  ],
+        [IPM_DST_LEFT  * w, h  ],
     ])
     return cv2.getPerspectiveTransform(src, dst)
 
 
-def centroid_x(mask, min_area):
-    """
-    Calcula la coordenada X del centroide de una máscara binaria.
-    Retorna None si el área es menor que min_area (se descarta como ruido).
-    """
+def centroid_x(mask):
     m = cv2.moments(mask, binaryImage=True)
-    if m['m00'] < max(min_area, 1e-3):
+    if m['m00'] < 1e-3:
         return None
     return m['m10'] / m['m00']
 
 
-def apply_hsv_masks(frame, white_lo, white_hi, yellow_lo, yellow_hi, M):
-    """
-    Aplica la IPM y genera las máscaras de color para blanco y amarillo.
-
-    Pasos:
-      1. Transforma la imagen a vista de pájaro (IPM).
-      2. Convierte de BGR a HSV.
-      3. Aplica umbrales de color para blanco y amarillo.
-      4. Limpia el ruido con morfología MORPH_OPEN.
-    """
-    h, w = frame.shape[:2]
-    warp   = cv2.warpPerspective(frame, M, (w, h))
-    hsv    = cv2.cvtColor(warp, cv2.COLOR_BGR2HSV)
-    kernel = np.ones((3, 3), np.uint8)
-    mask_w = cv2.morphologyEx(cv2.inRange(hsv, white_lo,  white_hi),  cv2.MORPH_OPEN, kernel)
-    mask_y = cv2.morphologyEx(cv2.inRange(hsv, yellow_lo, yellow_hi), cv2.MORPH_OPEN, kernel)
-    return warp, mask_w, mask_y
-
-
-def compute_lane_error(mask_white, mask_yellow, w, h):
-    """
-    Calcula el error lateral en metros respecto al centro del carril.
-
-    Casos:
-      Ambas líneas → centro = promedio entre blanca y amarilla.
-      Solo amarillo → centro = amarillo + media calzada a la derecha.
-      Solo blanco   → centro = blanco - media calzada a la izquierda.
-      Ninguna       → NaN → el controlador frena por seguridad.
-
-    Convención de signo:
-      error > 0 → centro a la DERECHA → girar derecha (omega < 0).
-      error < 0 → centro a la IZQUIERDA → girar izquierda (omega > 0).
-    """
-    row  = int(LOOK_AHEAD_ROW * h)
-    band = slice(max(0, row - 8), min(h, row + 8))
-
-    x_white  = centroid_x(mask_white[band,  :], MIN_AREA)
-    x_yellow = centroid_x(mask_yellow[band, :], MIN_AREA)
-
-    half_px = (LANE_WIDTH_M / 2.0) * PX_PER_METER
-
-    if x_white is not None and x_yellow is not None:
-        center_px = (x_white + x_yellow) / 2.0
-    elif x_yellow is not None:
-        center_px = x_yellow + half_px
-    elif x_white is not None:
-        center_px = x_white - half_px
-    else:
-        center_px = None
-
-    if center_px is None:
-        error_m = float('nan')
-    else:
-        error_m = (center_px - w / 2.0) / PX_PER_METER
-
-    return error_m, x_white, x_yellow, center_px, row
+def component_filter(mask, min_area, max_area, min_elong):
+    """Conserva componentes grandes y alargados (cintas) por elongacion PCA,
+    rechaza manchas/reflejos redondeados."""
+    num, labels, stats, _ = cv2.connectedComponentsWithStats(mask, connectivity=8)
+    out = np.zeros_like(mask)
+    for i in range(1, num):
+        area = stats[i, cv2.CC_STAT_AREA]
+        if area < min_area or area > max_area:
+            continue
+        ys, xs = np.where(labels == i)
+        if len(xs) < 10:
+            continue
+        pts = np.column_stack((xs, ys)).astype(np.float32)
+        _, _, eigval = cv2.PCACompute2(pts, mean=None)
+        elong = float(eigval[0, 0] / (eigval[1, 0] + 1e-6))
+        if elong >= min_elong:
+            out[labels == i] = 255
+    return out
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
-#  SECCIÓN 4 — CALIBRADOR HSV INTERACTIVO
-#  Uso: python3 lane_node.py --calibrar --source 0
-#  Abre ventanas con sliders para ajustar los valores HSV en tiempo real.
-#  Presiona 's' para guardar el YAML, 'q' para salir.
-# ═══════════════════════════════════════════════════════════════════════════════
+# ============================================================================
+#  SECCION 4 - NODO DETECTOR DE CARRIL (ROS2)
+#  Suscribe: /image_raw      Publica: /lane_error, /lane_slope,
+#            /lane/debug_image, y /servo_s2 (posicion de camara, una vez)
+# ============================================================================
+class LaneDetector(Node):
+    def __init__(self):
+        super().__init__('lane_detector')
+        self.bridge = CvBridge()
 
+        self.white_lo = np.array([WHITE_H_MIN, WHITE_S_MIN, WHITE_V_MIN], dtype=np.uint8)
+        self.white_hi = np.array([WHITE_H_MAX, WHITE_S_MAX, WHITE_V_MAX], dtype=np.uint8)
+        self.yellow_lo = np.array([YELLOW_H_MIN, YELLOW_S_MIN, YELLOW_V_MIN], dtype=np.uint8)
+        self.yellow_hi = np.array([YELLOW_H_MAX, YELLOW_S_MAX, YELLOW_V_MAX], dtype=np.uint8)
+
+        self.M = None
+        self.warp_size = None
+
+        self.x_yellow_f = None
+        self.x_white_f = None
+        self.x_center_f = None
+
+        self.sub = self.create_subscription(Image, '/image_raw', self.on_image, 10)
+        self.pub_err = self.create_publisher(Float32, '/lane_error', 10)
+        self.pub_slope = self.create_publisher(Float32, '/lane_slope', 10)
+        self.pub_dbg = self.create_publisher(Image, '/lane/debug_image', 10)
+        self.pub_servo = self.create_publisher(Int32, '/servo_s2', 10)
+
+        # Posicion de camara: se publica una vez al arrancar
+        self._servo_sent = False
+        self._servo_timer = self.create_timer(SERVO_INIT_DELAY, self._init_servo)
+
+        self.get_logger().info('lane_detector listo.')
+
+    def _init_servo(self):
+        if self._servo_sent:
+            return
+        msg = Int32()
+        msg.data = int(SERVO_S2)
+        self.pub_servo.publish(msg)
+        self.get_logger().info(f'Camara: servo s2 -> {SERVO_S2} grados')
+        self._servo_sent = True
+        self._servo_timer.cancel()
+
+    def on_image(self, msg):
+        try:
+            frame = self.bridge.imgmsg_to_cv2(msg, 'bgr8')
+        except Exception as e:
+            self.get_logger().error(f'cv_bridge: {e}')
+            return
+
+        h, w = frame.shape[:2]
+        if self.M is None:
+            self.M = build_ipm(w, h)
+            self.warp_size = (w, h)
+
+        warp = cv2.warpPerspective(frame, self.M, self.warp_size)
+        hsv = cv2.cvtColor(warp, cv2.COLOR_BGR2HSV)
+        mask_y_raw = cv2.inRange(hsv, self.yellow_lo, self.yellow_hi)
+        mask_w_raw = cv2.inRange(hsv, self.white_lo, self.white_hi)
+
+        open_k = np.ones((3, 3), np.uint8)
+        close_k = np.ones((7, 7), np.uint8)
+        mask_y_raw = cv2.morphologyEx(mask_y_raw, cv2.MORPH_OPEN, open_k)
+        mask_y_raw = cv2.morphologyEx(mask_y_raw, cv2.MORPH_CLOSE, close_k)
+        mask_w_raw = cv2.morphologyEx(mask_w_raw, cv2.MORPH_OPEN, open_k)
+        mask_w_raw = cv2.morphologyEx(mask_w_raw, cv2.MORPH_CLOSE, close_k)
+        mask_w_raw = cv2.bitwise_and(mask_w_raw, cv2.bitwise_not(mask_y_raw))
+
+        mask_yellow = component_filter(mask_y_raw, YELLOW_MIN_AREA, YELLOW_MAX_AREA, YELLOW_MIN_ELONG)
+        mask_white = component_filter(mask_w_raw, WHITE_MIN_AREA, WHITE_MAX_AREA, WHITE_MIN_ELONG)
+
+        band_rows = [h // 6, h // 2, (5 * h) // 6]
+        band_slices = [slice(0, h // 3), slice(h // 3, (2 * h) // 3), slice((2 * h) // 3, h)]
+
+        lane_width_px = LANE_WIDTH_M * PX_PER_METER
+        white_bias_px = WHITE_BIAS_M * PX_PER_METER
+
+        def band_center(sl):
+            xy = centroid_x(mask_yellow[sl, :])
+            xw = centroid_x(mask_white[sl, :])
+            if xy is not None and xw is not None:
+                dist = xw - xy
+                if dist <= 0 or dist < lane_width_px * 0.6 or dist > lane_width_px * 1.3:
+                    xw = None
+            if xy is not None and xw is not None:
+                return xy, xw, (xy + xw) / 2.0 - white_bias_px
+            elif xy is not None:
+                return xy, None, xy + lane_width_px / 2.0
+            elif xw is not None:
+                return None, xw, xw - lane_width_px / 2.0 - white_bias_px
+            return None, None, None
+
+        band_points = [band_center(sl) for sl in band_slices]
+        trajectory_pts = [(c, r) for (_, _, c), r in zip(band_points, band_rows) if c is not None]
+
+        slope_m = self._inferior_slope(mask_yellow, band_slices[2])
+        x_yellow_raw, x_white_raw, center_raw = band_points[2]
+
+        x_yellow = self._ema('x_yellow_f', x_yellow_raw)
+        x_white = self._ema('x_white_f', x_white_raw)
+        center_px = self._ema('x_center_f', center_raw)
+
+        error_m = (center_px - w / 2.0) / PX_PER_METER if center_px is not None else float('nan')
+
+        if center_px is not None:
+            safety_margin_px = lane_width_px * 0.30
+            angle_px = 0.0 if math.isnan(slope_m) else slope_m * PX_PER_METER
+            look_ahead_gain = 0.7
+            boost_gain = 1.2
+            max_error_m = 0.20
+            if x_yellow is not None:
+                d_y = (w / 2.0) - x_yellow
+                margin_y = safety_margin_px + max(0.0, -angle_px) * look_ahead_gain
+                if d_y < margin_y:
+                    error_m += ((margin_y - d_y) / PX_PER_METER) * boost_gain
+            if x_white is not None:
+                d_w = x_white - (w / 2.0)
+                margin_w = safety_margin_px + max(0.0, angle_px) * look_ahead_gain
+                if d_w < margin_w:
+                    error_m -= ((margin_w - d_w) / PX_PER_METER) * boost_gain
+            error_m = max(-max_error_m, min(max_error_m, error_m))
+
+        if x_yellow is not None:
+            target_cm = LANE_WIDTH_M * 100.0 / 2.0
+            sep_cm = ((w / 2.0) - x_yellow) / PX_PER_METER * 100.0
+            err_cm = sep_cm - target_cm
+            estado = ('se ACERCA al amarillo' if err_cm < -0.3
+                      else 'se ALEJA del amarillo' if err_cm > 0.3
+                      else f'separacion correcta ({target_cm:.1f}cm)')
+            self.get_logger().info(
+                f'Amarillo={x_yellow:.0f}px sep={sep_cm:.1f}cm err={err_cm:+.1f}cm -> {estado}',
+                throttle_duration_sec=0.5)
+        elif x_white is not None:
+            self.get_logger().info(f'Sin amarillo, usando BLANCO={x_white:.0f}px',
+                                   throttle_duration_sec=0.5)
+        else:
+            self.get_logger().info('Sin amarillo ni blanco — frena', throttle_duration_sec=0.5)
+
+        out = Float32(); out.data = float(error_m); self.pub_err.publish(out)
+        sout = Float32(); sout.data = float(slope_m); self.pub_slope.publish(sout)
+
+        self._publish_debug(warp, mask_white, mask_yellow, band_rows,
+                            x_white, x_yellow, center_px, msg, trajectory_pts)
+
+    def _inferior_slope(self, mask_yellow, sl):
+        ys, xs = np.where(mask_yellow[sl, :] > 0)
+        if len(xs) < 20:
+            return float('nan')
+        pts = np.column_stack((xs, ys)).astype(np.float32)
+        vx, vy, x0, y0 = cv2.fitLine(pts, cv2.DIST_L2, 0, 0.01, 0.01).flatten()
+        if abs(vy) < 1e-6:
+            return float('nan')
+        y_bot = (sl.stop - sl.start) - 1
+        x_top = x0 + (0 - y0) * (vx / vy)
+        x_bot = x0 + (y_bot - y0) * (vx / vy)
+        return (x_top - x_bot) / PX_PER_METER
+
+    def _ema(self, attr, value):
+        prev = getattr(self, attr)
+        if value is None:
+            setattr(self, attr, None)
+            return None
+        if prev is None:
+            setattr(self, attr, value)
+            return value
+        filtered = (1.0 - EMA_ALPHA) * prev + EMA_ALPHA * value
+        setattr(self, attr, filtered)
+        return filtered
+
+    def _publish_debug(self, warp, mask_white, mask_yellow, band_rows,
+                       xw, xy, xc, header_msg, trajectory_pts=None):
+        h, w = warp.shape[:2]
+        overlay = warp.copy()
+        overlay[mask_white > 0] = (255, 255, 255)
+        overlay[mask_yellow > 0] = (0, 255, 255)
+        dbg = cv2.addWeighted(overlay, 0.55, warp, 0.45, 0)
+        for r in band_rows:
+            cv2.line(dbg, (0, r), (w, r), (0, 255, 0), 1)
+        cv2.line(dbg, (w // 2, 0), (w // 2, h), (128, 128, 128), 1)
+        if trajectory_pts and len(trajectory_pts) >= 2:
+            pts = np.array([[int(x), int(y)] for x, y in trajectory_pts], dtype=np.int32)
+            cv2.polylines(dbg, [pts], False, (255, 0, 255), 2)
+            for x, y in trajectory_pts:
+                cv2.circle(dbg, (int(x), int(y)), 4, (255, 0, 255), -1)
+        mid_row = band_rows[1]
+        for x, color, label in ((xw, (200, 200, 200), 'W'),
+                                (xy, (0, 255, 255), 'Y'),
+                                (xc, (0, 0, 255), 'C')):
+            if x is not None:
+                cv2.circle(dbg, (int(x), mid_row), 6, color, -1)
+                cv2.putText(dbg, label, (int(x) + 8, mid_row - 4),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
+        out = self.bridge.cv2_to_imgmsg(dbg, 'bgr8')
+        out.header = header_msg.header
+        self.pub_dbg.publish(out)
+
+
+# ============================================================================
+#  SECCION 5 - NODO CONTROLADOR PID (ROS2)
+#  Suscribe: /lane_error, /lane_slope, /imu, /odom_raw   Publica: /cmd_vel
+# ============================================================================
+class LaneController(Node):
+    def __init__(self):
+        super().__init__('lane_controller')
+
+        self.error = None
+        self.slope = 0.0
+        self.last_error = 0.0
+        self.smooth_w = 0.0
+        self.integral = 0.0
+        self.initialized = False
+        self.start_time = None
+        self.last_stamp = self.get_clock().now()
+        self.last_rx = self.get_clock().now()
+        self.anticipation_timer = 0.0
+        self.in_sharp_turn = False
+
+        # Mision por odometria
+        self.laps_done = 0
+        self.total_dist = 0.0
+        self.last_odom_x = None
+        self.last_odom_y = None
+        self.mision_completa = False
+
+        self.sub_err = self.create_subscription(Float32, '/lane_error', self.on_error, 10)
+        self.sub_slope = self.create_subscription(Float32, '/lane_slope', self.on_slope, 10)
+        self.sub_odom = self.create_subscription(Odometry, '/odom_raw', self.on_odom, 10)
+        self.pub = self.create_publisher(Twist, '/cmd_vel', 10)
+        self.timer = self.create_timer(1.0 / CONTROL_RATE, self.control_loop)
+
+        self.get_logger().info('lane_controller listo.')
+        self.get_logger().info(
+            f'Mision: {NUM_VUELTAS} vueltas x {METROS_POR_VUELTA} m = '
+            f'{NUM_VUELTAS * METROS_POR_VUELTA:.1f} m totales.')
+
+    def on_error(self, msg):
+        if not math.isnan(msg.data):
+            self.error = msg.data
+            self.last_rx = self.get_clock().now()
+            if not self.initialized:
+                self.initialized = True
+                self.start_time = self.last_rx
+                self.get_logger().info(
+                    f'Color detectado — esperando {START_DELAY:.0f}s antes de avanzar...')
+
+    def on_slope(self, msg):
+        if not math.isnan(msg.data):
+            self.slope = msg.data
+
+    def on_odom(self, msg):
+        x = msg.pose.pose.position.x
+        y = msg.pose.pose.position.y
+        if self.last_odom_x is not None:
+            self.total_dist += math.hypot(x - self.last_odom_x, y - self.last_odom_y)
+            vueltas = int(self.total_dist / METROS_POR_VUELTA)
+            if vueltas > self.laps_done:
+                self.laps_done = vueltas
+                self.get_logger().info(
+                    f'Vuelta {self.laps_done}/{NUM_VUELTAS} completada '
+                    f'({self.total_dist:.1f} m)')
+                if self.laps_done >= NUM_VUELTAS:
+                    self.mision_completa = True
+                    self.get_logger().info('Mision completa. Frenando.')
+        self.last_odom_x = x
+        self.last_odom_y = y
+
+    def _smooth(self, target, alpha=0.25):
+        self.smooth_w = (1.0 - alpha) * self.smooth_w + alpha * target
+        return self.smooth_w
+
+    def control_loop(self):
+        now = self.get_clock().now()
+        dt = (now - self.last_stamp).nanoseconds * 1e-9
+        self.last_stamp = now
+        if dt <= 0.0:
+            return
+
+        if self.mision_completa:
+            self.pub.publish(Twist())
+            return
+
+        if not self.initialized:
+            self.pub.publish(Twist())
+            return
+
+        if (now - self.start_time).nanoseconds * 1e-9 < START_DELAY:
+            self.pub.publish(Twist())
+            return
+
+        age = (now - self.last_rx).nanoseconds * 1e-9
+        cmd = Twist()
+
+        if age > ERROR_TIMEOUT:
+            self.integral = 0.0
+            self.smooth_w = 0.0
+            self.in_sharp_turn = False
+            self.anticipation_timer = 0.0
+            self.pub.publish(Twist())
+            return
+
+        e = self.error
+        if abs(e) < 0.01:
+            e = 0.0
+
+        # Esquina real
+        if abs(self.slope) > SLOPE_CURVE_THRESHOLD:
+            self.anticipation_timer += dt
+        else:
+            self.anticipation_timer = 0.0
+        if (abs(self.slope) > SHARP_TURN_SLOPE_THRESHOLD
+                or self.anticipation_timer > MAX_ANTICIPATION_TIME):
+            self.in_sharp_turn = True
+            self.anticipation_timer = 0.0
+
+        if self.in_sharp_turn:
+            w_target = -(SHARP_TURN_KP_SLOPE * self.slope + SHARP_TURN_KP_E * e)
+            w_target = max(-SHARP_TURN_MAX_W, min(SHARP_TURN_MAX_W, w_target))
+            cmd.angular.z = self._smooth(w_target, alpha=0.10)
+            cmd.linear.x = LINEAR_SPEED * SHARP_TURN_SPEED_FACTOR
+            self.pub.publish(cmd)
+            if abs(self.slope) < SLOPE_CURVE_THRESHOLD and abs(e) < CALIB_TOLERANCE:
+                self.in_sharp_turn = False
+            return
+
+        # PID + feed-forward
+        P = KP * e
+        self.integral += e * dt
+        self.integral = max(-INTEGRAL_LIMIT, min(INTEGRAL_LIMIT, self.integral))
+        I = KI * self.integral
+        D = KD * (e - self.last_error) / dt
+        FF = KFF * self.slope if abs(self.slope) > SLOPE_CURVE_THRESHOLD else 0.0
+
+        w_pid = -(P + I + D + FF)
+        w_pid = max(-MAX_ANGULAR, min(MAX_ANGULAR, w_pid))
+
+        cmd.linear.x = LINEAR_SPEED * CURVE_SPEED_FACTOR
+        cmd.angular.z = self._smooth(w_pid, alpha=0.12)
+        self.pub.publish(cmd)
+        self.last_error = e
+
+
+# ============================================================================
+#  SECCION 6 - CALIBRADOR HSV INTERACTIVO  (python3 lane_node.py --calibrar)
+# ============================================================================
 def _nothing(_):
     pass
 
 
-def _make_trackbars(window, h_min, h_max, s_min, s_max, v_min, v_max):
-    """Crea una ventana con 6 sliders HSV."""
+def _make_trackbars(window, vals):
     cv2.namedWindow(window, cv2.WINDOW_NORMAL)
-    cv2.createTrackbar('H min', window, h_min, 180, _nothing)
-    cv2.createTrackbar('H max', window, h_max, 180, _nothing)
-    cv2.createTrackbar('S min', window, s_min, 255, _nothing)
-    cv2.createTrackbar('S max', window, s_max, 255, _nothing)
-    cv2.createTrackbar('V min', window, v_min, 255, _nothing)
-    cv2.createTrackbar('V max', window, v_max, 255, _nothing)
+    names = ('H min', 'H max', 'S min', 'S max', 'V min', 'V max')
+    maxs = (180, 180, 255, 255, 255, 255)
+    for n, v, mx in zip(names, vals, maxs):
+        cv2.createTrackbar(n, window, v, mx, _nothing)
 
 
 def _read_trackbars(window):
-    """Lee los 6 valores HSV actuales de los sliders."""
     return tuple(cv2.getTrackbarPos(k, window)
                  for k in ('H min', 'H max', 'S min', 'S max', 'V min', 'V max'))
 
 
 def _yaml_block(white, yellow):
-    """Genera el bloque YAML listo para copiar a hsv_params.yaml."""
     return f"""lane_detector:
   ros__parameters:
     white_h_min: {white[0]}
@@ -347,29 +547,14 @@ def _yaml_block(white, yellow):
     yellow_s_max: {yellow[3]}
     yellow_v_min: {yellow[4]}
     yellow_v_max: {yellow[5]}
-    min_area: {MIN_AREA}
     lane_width_m: {LANE_WIDTH_M}
     px_per_meter: {PX_PER_METER}
-    look_ahead_row: {LOOK_AHEAD_ROW}
+    servo_s2: {SERVO_S2}
     publish_debug: true
 """
 
 
 def run_calibrator(source):
-    """
-    Calibrador HSV interactivo con sliders en tiempo real.
-
-    Abre la cámara, aplica la IPM y muestra:
-      - Vista de pájaro con centroides W (blanco) e Y (amarillo) marcados.
-      - Máscara del blanco.
-      - Máscara del amarillo.
-
-    Cada segundo imprime en consola el YAML con los valores actuales.
-
-    Controles:
-      q / ESC : salir e imprimir el YAML final.
-      s       : guardar hsv_params_calibrado.yaml.
-    """
     cap = None
     static_img = None
     if source.isdigit():
@@ -380,23 +565,18 @@ def run_calibrator(source):
             static_img = img
         else:
             cap = cv2.VideoCapture(source)
-
     if static_img is None and (cap is None or not cap.isOpened()):
         raise SystemExit(f'No se pudo abrir la fuente: {source}')
 
     _make_trackbars('Blanco (borde)',
-                    WHITE_H_MIN, WHITE_H_MAX, WHITE_S_MIN,
-                    WHITE_S_MAX, WHITE_V_MIN, WHITE_V_MAX)
+                    (WHITE_H_MIN, WHITE_H_MAX, WHITE_S_MIN, WHITE_S_MAX, WHITE_V_MIN, WHITE_V_MAX))
     _make_trackbars('Amarillo (eje)',
-                    YELLOW_H_MIN, YELLOW_H_MAX, YELLOW_S_MIN,
-                    YELLOW_S_MAX, YELLOW_V_MIN, YELLOW_V_MAX)
+                    (YELLOW_H_MIN, YELLOW_H_MAX, YELLOW_S_MIN, YELLOW_S_MAX, YELLOW_V_MIN, YELLOW_V_MAX))
 
     M = None
     last_print = 0.0
     white = yellow = None
-
-    print('\n[CALIBRADOR] Ajusta los sliders hasta que las líneas se vean claras.')
-    print('[CALIBRADOR] Presiona "s" para guardar el YAML, "q" para salir.\n')
+    print('\n[CALIBRADOR] Ajusta los sliders. "s" guarda YAML, "q" sale.\n')
 
     while True:
         frame = static_img.copy() if static_img is not None else None
@@ -404,38 +584,30 @@ def run_calibrator(source):
             ok, frame = cap.read()
             if not ok:
                 break
-
         frame = cv2.resize(frame, (640, 480))
         h, w = frame.shape[:2]
         if M is None:
             M = build_ipm(w, h)
 
-        white  = _read_trackbars('Blanco (borde)')
+        white = _read_trackbars('Blanco (borde)')
         yellow = _read_trackbars('Amarillo (eje)')
-
-        white_lo  = np.array([white[0],  white[2],  white[4]])
-        white_hi  = np.array([white[1],  white[3],  white[5]])
-        yellow_lo = np.array([yellow[0], yellow[2], yellow[4]])
-        yellow_hi = np.array([yellow[1], yellow[3], yellow[5]])
-
-        warp, mask_w, mask_y = apply_hsv_masks(
-            frame, white_lo, white_hi, yellow_lo, yellow_hi, M)
-
-        row  = int(LOOK_AHEAD_ROW * h)
-        band = slice(max(0, row - 8), min(h, row + 8))
-        xw = centroid_x(mask_w[band, :], MIN_AREA)
-        xy = centroid_x(mask_y[band, :], MIN_AREA)
+        warp = cv2.warpPerspective(frame, M, (w, h))
+        hsv = cv2.cvtColor(warp, cv2.COLOR_BGR2HSV)
+        mask_w = cv2.inRange(hsv, np.array([white[0], white[2], white[4]]),
+                             np.array([white[1], white[3], white[5]]))
+        mask_y = cv2.inRange(hsv, np.array([yellow[0], yellow[2], yellow[4]]),
+                             np.array([yellow[1], yellow[3], yellow[5]]))
 
         view = warp.copy()
-        cv2.line(view, (0, row), (w, row), (0, 255, 0), 1)
-        for x, color, label in [(xw, (255,255,255), 'W'), (xy, (0,255,255), 'Y')]:
+        xw = centroid_x(mask_w)
+        xy = centroid_x(mask_y)
+        for x, color, label in ((xw, (255, 255, 255), 'W'), (xy, (0, 255, 255), 'Y')):
             if x is not None:
-                cv2.circle(view, (int(x), row), 6, color, -1)
-                cv2.putText(view, label, (int(x)-5, row-12),
+                cv2.circle(view, (int(x), h // 2), 6, color, -1)
+                cv2.putText(view, label, (int(x) - 5, h // 2 - 12),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
-
-        cv2.imshow('IPM + centroides (W=blanco Y=amarillo)', view)
-        cv2.imshow('Mascara blanco',   mask_w)
+        cv2.imshow('IPM (W=blanco Y=amarillo)', view)
+        cv2.imshow('Mascara blanco', mask_w)
         cv2.imshow('Mascara amarillo', mask_y)
 
         if time.time() - last_print > 1.0:
@@ -454,207 +626,15 @@ def run_calibrator(source):
     if cap is not None:
         cap.release()
     cv2.destroyAllWindows()
-
     if white and yellow:
         print('\n=== YAML FINAL (copiar a config/hsv_params.yaml) ===')
         print(_yaml_block(white, yellow))
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
-#  SECCIÓN 5 — NODO DETECTOR DE CARRIL (ROS2)
-#  Suscribe: /camera/image_raw
-#  Publica:  /lane_error        → error lateral en metros
-#            /lane/debug_image  → imagen de pájaro con líneas marcadas
-# ═══════════════════════════════════════════════════════════════════════════════
-
-class LaneDetector(Node):
-    def __init__(self):
-        super().__init__('lane_detector')
-        self.bridge = CvBridge()
-
-        self.white_lo  = np.array([WHITE_H_MIN,  WHITE_S_MIN,  WHITE_V_MIN])
-        self.white_hi  = np.array([WHITE_H_MAX,  WHITE_S_MAX,  WHITE_V_MAX])
-        self.yellow_lo = np.array([YELLOW_H_MIN, YELLOW_S_MIN, YELLOW_V_MIN])
-        self.yellow_hi = np.array([YELLOW_H_MAX, YELLOW_S_MAX, YELLOW_V_MAX])
-
-        self.M = None
-
-        self.sub     = self.create_subscription(Image, '/camera/image_raw', self.on_image, 10)
-        self.pub_err = self.create_publisher(Float32, '/lane_error', 10)
-        self.pub_dbg = self.create_publisher(Image,   '/lane/debug_image', 10)
-        self.get_logger().info('lane_detector listo.')
-
-    def on_image(self, msg):
-        """
-        Callback por cada frame de la cámara.
-
-        1. Convierte mensaje ROS a imagen OpenCV.
-        2. Construye la IPM en el primer frame.
-        3. Aplica IPM y máscaras HSV.
-        4. Calcula el error lateral.
-        5. Publica error e imagen debug.
-        """
-        frame = self.bridge.imgmsg_to_cv2(msg, 'bgr8')
-        h, w  = frame.shape[:2]
-
-        if self.M is None:
-            self.M = build_ipm(w, h)
-
-        warp, mask_w, mask_y = apply_hsv_masks(
-            frame, self.white_lo, self.white_hi,
-            self.yellow_lo, self.yellow_hi, self.M)
-
-        error_m, x_white, x_yellow, center_px, row = compute_lane_error(
-            mask_w, mask_y, w, h)
-
-        out      = Float32()
-        out.data = float(error_m)
-        self.pub_err.publish(out)
-
-        self._publish_debug(warp, row, x_white, x_yellow, center_px, msg)
-
-    def _publish_debug(self, warp, row, xw, xy, xc, header_msg):
-        """
-        Publica imagen de pájaro en /lane/debug_image con:
-          Línea verde  = fila de muestreo.
-          Punto blanco = centroide borde blanco.
-          Punto cian   = centroide eje amarillo.
-          Punto rojo   = centro estimado del carril.
-        """
-        dbg = warp.copy()
-        cv2.line(dbg, (0, row), (dbg.shape[1], row), (0, 255, 0), 1)
-        for x, color in [(xw, (255,255,255)), (xy, (0,255,255)), (xc, (0,0,255))]:
-            if x is not None:
-                cv2.circle(dbg, (int(x), row), 5, color, -1)
-        out        = self.bridge.cv2_to_imgmsg(dbg, 'bgr8')
-        out.header = header_msg.header
-        self.pub_dbg.publish(out)
-
-
-# ═══════════════════════════════════════════════════════════════════════════════
-#  SECCIÓN 6 — NODO CONTROLADOR PID (ROS2)
-#  Suscribe: /lane_error, /odom_raw
-#  Publica:  /cmd_vel → velocidad lineal y angular del robot
-# ═══════════════════════════════════════════════════════════════════════════════
-
-class LaneController(Node):
-    def __init__(self):
-        super().__init__('lane_controller')
-
-        self.error      = None
-        self.last_error = 0.0
-        self.integral   = 0.0
-        self.last_stamp = self.get_clock().now()
-        self.last_rx    = self.get_clock().now()
-
-        self.laps_done       = 0
-        self.total_dist      = 0.0
-        self.last_odom_x     = None
-        self.last_odom_y     = None
-        self.mision_completa = False
-
-        self.sub_err  = self.create_subscription(Float32,  '/lane_error', self.on_error, 10)
-        self.sub_odom = self.create_subscription(Odometry, '/odom_raw',   self.on_odom,  10)
-        self.pub      = self.create_publisher(Twist, '/cmd_vel', 10)
-        self.timer    = self.create_timer(1.0 / CONTROL_RATE, self.control_loop)
-
-        self.get_logger().info('lane_controller listo.')
-        self.get_logger().info(
-            f'Mision: {NUM_VUELTAS} vueltas x {METROS_POR_VUELTA} m = '
-            f'{NUM_VUELTAS * METROS_POR_VUELTA:.1f} m totales.')
-
-    def on_error(self, msg):
-        """Recibe el error lateral. Solo actualiza si no es NaN."""
-        if not math.isnan(msg.data):
-            self.error   = msg.data
-            self.last_rx = self.get_clock().now()
-
-    def on_odom(self, msg):
-        """
-        Acumula distancia recorrida y cuenta vueltas.
-        Cuando se completan NUM_VUELTAS, activa mision_completa.
-        """
-        x = msg.pose.pose.position.x
-        y = msg.pose.pose.position.y
-
-        if self.last_odom_x is not None:
-            self.total_dist += math.hypot(x - self.last_odom_x,
-                                          y - self.last_odom_y)
-            vueltas = int(self.total_dist / METROS_POR_VUELTA)
-            if vueltas > self.laps_done:
-                self.laps_done = vueltas
-                self.get_logger().info(
-                    f'Vuelta {self.laps_done}/{NUM_VUELTAS} completada '
-                    f'({self.total_dist:.1f} m recorridos)')
-                if self.laps_done >= NUM_VUELTAS:
-                    self.mision_completa = True
-                    self.get_logger().info('Mision completa. Frenando.')
-
-        self.last_odom_x = x
-        self.last_odom_y = y
-
-    def control_loop(self):
-        """
-        Lazo PID a CONTROL_RATE Hz.
-
-        Si mision completa    → frena definitivamente.
-        Si sin error reciente → frena por seguridad (timeout).
-        Si error válido       → calcula omega con PID y publica /cmd_vel.
-
-        PID:
-          P = KP * error
-          I = KI * integral (con anti-windup ±INTEGRAL_LIMIT)
-          D = KD * (error - last_error) / dt
-          omega saturado a ±MAX_ANGULAR
-        """
-        now = self.get_clock().now()
-        dt  = (now - self.last_stamp).nanoseconds * 1e-9
-        self.last_stamp = now
-        if dt <= 0.0:
-            return
-
-        if self.mision_completa:
-            self.pub.publish(Twist())
-            return
-
-        age = (now - self.last_rx).nanoseconds * 1e-9
-        if self.error is None or age > ERROR_TIMEOUT:
-            self.pub.publish(Twist())
-            self.integral = 0.0
-            return
-
-        error  = self.error
-        p_term = KP * error
-
-        self.integral += error * dt
-        self.integral  = max(-INTEGRAL_LIMIT, min(INTEGRAL_LIMIT, self.integral))
-        i_term = KI * self.integral
-
-        d_term = KD * (error - self.last_error) / dt
-
-        w = max(-MAX_ANGULAR, min(MAX_ANGULAR, p_term + i_term + d_term))
-        self.last_error = error
-
-        cmd           = Twist()
-        cmd.linear.x  = LINEAR_SPEED
-        cmd.angular.z = w
-        self.pub.publish(cmd)
-
-
-# ═══════════════════════════════════════════════════════════════════════════════
-#  SECCIÓN 7 — PUNTO DE ENTRADA
-# ═══════════════════════════════════════════════════════════════════════════════
-
+# ============================================================================
+#  SECCION 7 - PUNTO DE ENTRADA
+# ============================================================================
 def main(args=None):
-    """
-    Modo calibrar (--calibrar --source 0):
-      Abre el calibrador HSV interactivo sin ROS2.
-      Ajusta los sliders y presiona 's' para guardar el YAML.
-
-    Modo normal (sin argumentos):
-      Lanza LaneDetector + LaneController en paralelo.
-      El robot sigue el carril y se detiene al completar NUM_VUELTAS.
-    """
     parser = argparse.ArgumentParser(description='CapyTown Lane Node RC-2')
     parser.add_argument('--calibrar', action='store_true',
                         help='Modo calibracion HSV interactivo (sin ROS2)')
@@ -671,13 +651,12 @@ def main(args=None):
         sys.exit(1)
 
     rclpy.init(args=args)
-    detector   = LaneDetector()
+    detector = LaneDetector()
     controller = LaneController()
 
     executor = MultiThreadedExecutor()
     executor.add_node(detector)
     executor.add_node(controller)
-
     try:
         executor.spin()
     except KeyboardInterrupt:

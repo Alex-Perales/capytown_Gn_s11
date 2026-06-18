@@ -1,0 +1,15 @@
+# CapyTown G4 - Ganancias PID de partida (sec. 5.2 del enunciado).
+#
+# Regla de oro: sintonizar UN parametro a la vez (primero kp, luego kd,
+# al final ki si hace falta), grabando un ros2 bag por cada cambio
+# (ver README).
+lane_controller:
+  ros__parameters:
+    kp: 2.5
+    ki: 0.0
+    kd: 0.3
+    linear_speed: 0.20       # m/s - velocidad de crucero (min. aceptable 0.15)
+    max_angular: 2.0         # rad/s - saturacion de omega
+    integral_limit: 0.5      # anti-windup: limite del termino integral
+    error_timeout: 0.5       # s sin /lane_error => frena por seguridad
+    control_rate: 30.0       # Hz del lazo de control
