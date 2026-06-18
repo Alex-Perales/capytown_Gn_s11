@@ -3,7 +3,7 @@
 Lane following con visión HSV + IPM y control PID + feedforward
 (ROS2 Humble, Yahboom Pi5).
 
-## Pista de este reto (RETO2 MODIFICADO)
+## Pista de este reto 
 
 Pista cuadrada de 2 m x 2 m (4 tiles verdes de 1 m x 1 m en el centro).
 
