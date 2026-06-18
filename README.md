@@ -5,7 +5,7 @@ Lane following con visión HSV + IPM y control PID (ROS2 Humble, Yahboom Pi5).
 ## Pista de este reto (RETO2 MODIFICADO)
 
 Esta version usa la pista cuadrada de 2 m x 2 m (4 tiles verdes de 1 m x 1 m
-en el centro), en vez del escenario rectangular 2.5 m x 2 m usado antes:
+en el centro)
 
 - Carril perimetral: borde **blanco** por fuera, eje **amarillo** por el
   centro del carril (mismo ancho de carril, `lane_width_m = 0.21 m`).
