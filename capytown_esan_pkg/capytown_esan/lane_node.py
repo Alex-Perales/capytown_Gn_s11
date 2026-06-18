@@ -34,7 +34,8 @@ CONVENCION DE SIGNO:
 #  SECCION 1 - VARIABLES CONFIGURABLES
 # ============================================================================
 
-# -- MISION --
+# ============================================================================
+# -- MISION--
 NUM_VUELTAS = 3            # vueltas autonomas antes de frenar
 METROS_POR_VUELTA = 6.4    # perimetro aprox. de una vuelta (m)
 
@@ -42,7 +43,7 @@ METROS_POR_VUELTA = 6.4    # perimetro aprox. de una vuelta (m)
 SERVO_S2 = -45             # grados; se publica en /servo_s2 al arrancar
 SERVO_INIT_DELAY = 0.5     # s antes de publicar la posicion de camara
 
-# -- VELOCIDAD / CONTROL --
+# -- VELOCIDAD / CONTROL -----------------------------------------------------
 LINEAR_SPEED = 0.34        # m/s de crucero (>=0.2 requerido)
 CURVE_SPEED_FACTOR = 0.6   # reduce velocidad 40% siempre (margen de reaccion)
 MAX_ANGULAR = 2.0          # rad/s tope de giro
@@ -57,7 +58,7 @@ KD = 0.25
 KFF = 0.6                  # feed-forward de anticipacion por pendiente
 INTEGRAL_LIMIT = 0.5
 
-# -- ESQUINAS (giro dedicado) --
+# -- ESQUINAS (giro dedicado) -------------------------------------------------
 SLOPE_CURVE_THRESHOLD = 0.04        # pendiente minima para anticipar curva
 SHARP_TURN_SLOPE_THRESHOLD = 0.13   # pendiente que indica esquina ~90 grados
 SHARP_TURN_KP_SLOPE = 3.0
@@ -67,7 +68,7 @@ SHARP_TURN_SPEED_FACTOR = 0.3
 MAX_ANTICIPATION_TIME = 0.8
 CALIB_TOLERANCE = 0.025
 
-# -- VISION: COLORES HSV --
+# -- VISION: COLORES HSV 
 WHITE_H_MIN, WHITE_H_MAX = 0, 180
 WHITE_S_MIN, WHITE_S_MAX = 0, 65
 WHITE_V_MIN, WHITE_V_MAX = 170, 255
