@@ -201,17 +201,6 @@ vueltas y genera `sim_carrito.png` con la trayectoria y el error lateral
 (plano en rectas, picos en las esquinas). Cambiar las ganancias arriba
 del archivo para experimentar (p. ej. subir `kp` muestra el zigzag).
 
-## Entregables de la sec. 7 — checklist
-
-- [x] `lane_detector.py` / `lane_controller.py` / `lane_node.py` con ganancias PID por YAML.
-- [ ] `config/hsv_params.yaml` calibrado con los valores del DÍA DEL LAB.
-- [ ] Video MP4 de 3 vueltas sin intervención humana.
-- [ ] `lane_error_s11.png` (con `scripts/plot_lane_error.py`).
-- [ ] Foto de la predicción de activación cognitiva (`docs/activacion_cognitiva.md`).
-- [ ] (Bonus) comparativa con/sin IPM.
-- [ ] `ros2 bag` de la corrida final (NO subir al repo).
-- [ ] Tag de git `s11` sobre la rama del grupo.
-
 ## Convenio de signo de /lane_error
 
 `error_m > 0` → el centro del carril está a la **derecha** del robot
