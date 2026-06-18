@@ -66,7 +66,6 @@ capytown_G4_s11/
 │   └── plot_lane_error.py  # genera lane_error_s11.png desde el bag
 ├── docs/
 │   └── activacion_cognitiva.md  # plantilla de la predicción de la sec. 2
-├── sim_carrito.py          # simulador en PC (sin ROS): trayectoria + lane_error
 └── README.md
 ```
 
